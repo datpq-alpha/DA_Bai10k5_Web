@@ -35,7 +35,7 @@
 </head>
 <body>
 
-    <h2 id="statusText" class="loading">Đang tải AI Camera & Hình ảnh... Vui lòng chờ!</h2>
+    <h2 id="statusText" class="loading">Đang tải Camera & AI... (Có thể mất 10-20 giây)</h2>
     
     <video id="videoElement" autoplay playsinline></video>
     <canvas id="gameCanvas" width="800" height="400"></canvas>
@@ -46,7 +46,7 @@
         const videoElement = document.getElementById('videoElement');
         const statusText = document.getElementById('statusText');
 
-        // --- 1. TẢI HÌNH ẢNH ---
+        // --- 1. TẢI HÌNH ẢNH (Đã sửa background.jpg) ---
         const bgImg = new Image(); bgImg.src = 'background.jpg';
         const robotImg = new Image(); robotImg.src = 'robot.png';
         const spikeImg = new Image(); spikeImg.src = 'spike.png';
@@ -54,6 +54,7 @@
         // --- 2. CẤU HÌNH GAME ---
         let gameState = resetGame();
         let currentGesture = "None";
+        let isSegReady = false; // Biến kiểm tra AI xóa phông đã sẵn sàng chưa
 
         function resetGame() {
             return {
@@ -73,32 +74,23 @@
         }
 
         // --- 3. KHỞI TẠO AI: HANDS & SELFIE SEGMENTATION ---
-        
-        // Canvas ẩn để xử lý việc cắt nền thành trong suốt
         const segCanvas = document.createElement('canvas');
         segCanvas.width = 320;
         segCanvas.height = 240;
         const segCtx = segCanvas.getContext('2d');
 
-        // Cấu hình Nhận diện tay
-        const hands = new Hands({locateFile: (file) => {
-            return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
-        }});
+        const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
         hands.setOptions({ maxNumHands: 1, minDetectionConfidence: 0.7, minTrackingConfidence: 0.5 });
 
-        // Cấu hình Xóa phông
-        const selfieSegmentation = new SelfieSegmentation({locateFile: (file) => {
-            return `https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation/${file}`;
-        }});
-        selfieSegmentation.setOptions({ modelSelection: 1 }); // 1 giúp chạy mượt hơn trên Web
+        const selfieSegmentation = new SelfieSegmentation({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation/${file}`});
+        selfieSegmentation.setOptions({ modelSelection: 1 });
 
-        // Xử lý dữ liệu ngón tay
+        // Xử lý tay
         hands.onResults((results) => {
             currentGesture = "None";
             if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
                 const landmarks = results.multiHandLandmarks[0];
                 let fingers = [];
-                
                 if (landmarks[8].y < landmarks[6].y) fingers.push(1); else fingers.push(0);
                 if (landmarks[12].y < landmarks[10].y) fingers.push(1); else fingers.push(0);
                 if (landmarks[16].y < landmarks[14].y) fingers.push(1); else fingers.push(0);
@@ -109,36 +101,34 @@
                 else if (totalFingers >= 3) currentGesture = "PAPER";
             }
 
-            if (currentGesture === "ROCK" && !gameState.pausing && gameState.robot_y === 230) {
-                gameState.jump = true;
-            }
-            if (currentGesture === "PAPER" && gameState.pausing) {
-                gameState = resetGame();
-            }
+            if (currentGesture === "ROCK" && !gameState.pausing && gameState.robot_y === 230) gameState.jump = true;
+            if (currentGesture === "PAPER" && gameState.pausing) gameState = resetGame();
         });
 
-        // Xử lý dữ liệu Xóa phông (Tạo ảnh có nền trong suốt)
+        // Xử lý xóa phông
         selfieSegmentation.onResults((results) => {
+            isSegReady = true;
             statusText.innerText = "AI Đã Sẵn Sàng! Nắm tay (Nhảy) - Xòe tay (Chơi lại)";
             statusText.style.color = "#2ecc71";
 
-            // Xóa canvas ẩn
             segCtx.clearRect(0, 0, segCanvas.width, segCanvas.height);
-            
-            // Vẽ mặt nạ (vùng là con người)
             segCtx.globalCompositeOperation = 'source-over';
             segCtx.drawImage(results.segmentationMask, 0, 0, segCanvas.width, segCanvas.height);
-            
-            // Chỉ giữ lại hình ảnh camera ở những nơi có mặt nạ (nền sẽ bị loại bỏ thành trong suốt)
             segCtx.globalCompositeOperation = 'source-in';
             segCtx.drawImage(results.image, 0, 0, segCanvas.width, segCanvas.height);
         });
 
-        // Bật Camera và nạp ảnh vào cả 2 mô hình AI
+        // Bật Camera và nạp ảnh song song để không bị nghẽn
         const camera = new Camera(videoElement, {
             onFrame: async () => {
-                await hands.send({image: videoElement});
-                await selfieSegmentation.send({image: videoElement});
+                try {
+                    await Promise.all([
+                        hands.send({image: videoElement}),
+                        selfieSegmentation.send({image: videoElement})
+                    ]);
+                } catch (error) {
+                    console.log("AI Loading..."); // Tránh báo lỗi làm treo game
+                }
             },
             width: 320,
             height: 240
@@ -149,7 +139,7 @@
         function gameLoop() {
             if (!gameState.pausing) {
                 gameState.bg_x -= (gameState.x_velocity / 2); 
-                if (gameState.bg_x <= -800) gameState.bg_x = 0; // Cuộn nền
+                if (gameState.bg_x <= -800) gameState.bg_x = 0;
 
                 gameState.spike_x -= gameState.x_velocity;
                 if (gameState.spike_x <= -50) {
@@ -168,27 +158,14 @@
                 }
                 if (gameState.robot_y > 230) gameState.robot_y = 230;
 
-                // Va chạm
-                let rHitX = gameState.robot_x + 10;
-                let rHitY = gameState.robot_y + 10;
-                let rHitW = gameState.robot_size - 20;
-                let rHitH = gameState.robot_size - 20;
-
-                let sHitX = gameState.spike_x + 10;
-                let sHitY = gameState.spike_y + 10;
-                let sHitW = gameState.spike_size - 20;
-                let sHitH = gameState.spike_size - 20;
-
-                if (rHitX < sHitX + sHitW && rHitX + rHitW > sHitX && rHitY < sHitY + sHitH && rHitY + rHitH > sHitY) {
-                    gameState.pausing = true;
-                }
+                let rHitX = gameState.robot_x + 10, rHitY = gameState.robot_y + 10, rHitW = gameState.robot_size - 20, rHitH = gameState.robot_size - 20;
+                let sHitX = gameState.spike_x + 10, sHitY = gameState.spike_y + 10, sHitW = gameState.spike_size - 20, sHitH = gameState.spike_size - 20;
+                if (rHitX < sHitX + sHitW && rHitX + rHitW > sHitX && rHitY < sHitY + sHitH && rHitY + rHitH > sHitY) gameState.pausing = true;
             }
 
-            // Xóa khung hình cũ
             ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-            // Vẽ Nền bằng HÌNH ẢNH (Vẽ 2 tấm nối tiếp nhau để tạo hiệu ứng chạy vô tận)
-            // Nếu ảnh chưa load xong, vẽ tạm màu dự phòng
+            // Vẽ Nền
             if (bgImg.complete && bgImg.naturalHeight !== 0) {
                 ctx.drawImage(bgImg, gameState.bg_x, 0, 800, 400);
                 ctx.drawImage(bgImg, gameState.bg_x + 800, 0, 800, 400);
@@ -196,45 +173,35 @@
                 ctx.fillStyle = '#e0e0e0'; ctx.fillRect(0, 0, 800, 400);
             }
 
-            // Vẽ Spike bằng HÌNH ẢNH
-            if (spikeImg.complete && spikeImg.naturalHeight !== 0) {
-                ctx.drawImage(spikeImg, gameState.spike_x, gameState.spike_y, gameState.spike_size, gameState.spike_size);
-            } else {
-                ctx.fillStyle = 'red'; ctx.fillRect(gameState.spike_x, gameState.spike_y, gameState.spike_size, gameState.spike_size);
-            }
+            // Vẽ Spike
+            if (spikeImg.complete && spikeImg.naturalHeight !== 0) ctx.drawImage(spikeImg, gameState.spike_x, gameState.spike_y, gameState.spike_size, gameState.spike_size);
+            else { ctx.fillStyle = 'red'; ctx.fillRect(gameState.spike_x, gameState.spike_y, gameState.spike_size, gameState.spike_size); }
 
-            // Vẽ Robot bằng HÌNH ẢNH
-            if (robotImg.complete && robotImg.naturalHeight !== 0) {
-                ctx.drawImage(robotImg, gameState.robot_x, gameState.robot_y, gameState.robot_size, gameState.robot_size);
-            } else {
-                ctx.fillStyle = 'blue'; ctx.fillRect(gameState.robot_x, gameState.robot_y, gameState.robot_size, gameState.robot_size);
-            }
+            // Vẽ Robot
+            if (robotImg.complete && robotImg.naturalHeight !== 0) ctx.drawImage(robotImg, gameState.robot_x, gameState.robot_y, gameState.robot_size, gameState.robot_size);
+            else { ctx.fillStyle = 'blue'; ctx.fillRect(gameState.robot_x, gameState.robot_y, gameState.robot_size, gameState.robot_size); }
 
-            // Vẽ Text
-            ctx.fillStyle = 'white';
-            ctx.font = 'bold 24px Arial';
-            ctx.fillText(`Điểm: ${gameState.score}`, 20, 40);
-            ctx.fillStyle = '#2ecc71';
-            ctx.fillText(`Cử chỉ AI: ${currentGesture}`, 20, 70);
+            ctx.fillStyle = 'white'; ctx.font = 'bold 24px Arial'; ctx.fillText(`Điểm: ${gameState.score}`, 20, 40);
+            ctx.fillStyle = '#2ecc71'; ctx.fillText(`Cử chỉ AI: ${currentGesture}`, 20, 70);
 
             if (gameState.pausing) {
-                ctx.fillStyle = 'red';
-                ctx.font = 'bold 40px Arial';
-                ctx.fillText('GAME OVER', canvas.width/2 - 120, canvas.height/2 - 20);
-                ctx.font = '24px Arial';
-                ctx.fillText('Xòe tay (PAPER) để chơi lại', canvas.width/2 - 140, canvas.height/2 + 20);
+                ctx.fillStyle = 'red'; ctx.font = 'bold 40px Arial'; ctx.fillText('GAME OVER', canvas.width/2 - 120, canvas.height/2 - 20);
+                ctx.font = '24px Arial'; ctx.fillText('Xòe tay (PAPER) để chơi lại', canvas.width/2 - 140, canvas.height/2 + 20);
             }
 
-            // --- VẼ CAMERA (Xóa phông) lên góc phải ---
+            // --- VẼ CAMERA GÓC PHẢI ---
             ctx.save();
-            ctx.scale(-1, 1); // Lật gương
-            // Vẽ segCanvas (Nơi chứa ảnh đã tách nền)
-            ctx.drawImage(segCanvas, -canvas.width + 10, 10, 200, 150); 
+            ctx.scale(-1, 1);
+            if (isSegReady) {
+                // Nếu AI xóa phông đã xong -> Vẽ ảnh trong suốt
+                ctx.drawImage(segCanvas, -canvas.width + 10, 10, 200, 150);
+            } else if (videoElement.readyState === 4) {
+                // Nếu AI chưa xong -> Vẽ tạm camera gốc có nền để ko bị đen màn hình
+                ctx.drawImage(videoElement, -canvas.width + 10, 10, 200, 150);
+            }
             ctx.restore();
             
-            // Vẽ khung viền cho đẹp
-            ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
-            ctx.lineWidth = 2;
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)'; ctx.lineWidth = 2;
             ctx.strokeRect(canvas.width - 210, 10, 200, 150); 
 
             requestAnimationFrame(gameLoop);
